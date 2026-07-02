@@ -1,0 +1,48 @@
+# ==============================================================================
+# UV & Environment Specifics
+# ==============================================================================
+# The local virtual environment folder managed by uv
+.venv/
+
+# Ignore uv.lock for library/package repositories to maximize dependency
+# testing flexibility. (Commit this only if you are building an application)
+uv.lock
+
+# Optional: Ignore if you want devs to use their own local Python version pins
+# .python-version
+
+# ==============================================================================
+# Python Build, Distribution & Caches
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+
+# ==============================================================================
+# Testing, Coverage & Code Quality
+# ==============================================================================
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ==============================================================================
+# Environment Variables & Secrets
+# ==============================================================================
+.env
+.env.*
+!.env.example
+
+# ==============================================================================
+# IDEs & System Files
+# ==============================================================================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

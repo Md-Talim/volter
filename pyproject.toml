@@ -1,0 +1,18 @@
+[project]
+name = "throttler"
+version = "0.1.0"
+description = "Rate limiting library with token bucket and sliding window algorithms, in-memory and Redis-backed"
+readme = "README.md"
+authors = [
+    { name = "Md. Talim", email = "talimmohammad116@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+redis = ["redis>=8.0.1"]
+fastapi = ["fastapi>=0.139.0"]
+
+[build-system]
+requires = ["uv_build>=0.11.26,<0.12.0"]
+build-backend = "uv_build"
