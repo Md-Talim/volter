@@ -22,6 +22,7 @@ __pycache__/
 build/
 dist/
 wheels/
+dump.rdb
 
 # ==============================================================================
 # Testing, Coverage & Code Quality
