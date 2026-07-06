@@ -36,7 +36,7 @@ if tokens >= requested then
     allowed = 1
 end
 
-redis.call('HMSET', KEYS[1], 'tokens', tokens, 'last_refill', now)
+redis.call('HSET', KEYS[1], 'tokens', tokens, 'last_refill', now)
 redis.call('EXPIRE', KEYS[1], ttl)
 
 return allowed
