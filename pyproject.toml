@@ -3,6 +3,8 @@ name = "volter"
 version = "0.1.0"
 description = "Rate limiting library with token bucket and sliding window algorithms, in-memory and Redis-backed"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE*"]
 authors = [
     { name = "Md. Talim", email = "talimmohammad116@gmail.com" }
 ]
