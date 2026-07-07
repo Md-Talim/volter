@@ -2,7 +2,7 @@ import multiprocessing
 
 import redis
 
-from throttler.redis_sliding_window import RedisSlidingWindowLimiter
+from volter.redis_sliding_window import RedisSlidingWindowLimiter
 
 
 def _worker(results_queue: multiprocessing.Queue) -> None:
@@ -13,7 +13,7 @@ def _worker(results_queue: multiprocessing.Queue) -> None:
 
 def test_atomic_across_processes():
     client = redis.Redis(host="localhost", port=6379, decode_responses=True)
-    _ = client.delete("throttler:sw:shared-key")
+    _ = client.delete("volter:sw:shared-key")
 
     results_queue = multiprocessing.Queue()
     processes = [
@@ -32,7 +32,7 @@ def test_atomic_across_processes():
 
 def test_expired_entries_free_up_capacity():
     client = redis.Redis(host="localhost", port=6379, decode_responses=True)
-    _ = client.delete("throttler:sw:shared-key")
+    _ = client.delete("volter:sw:shared-key")
 
     limiter = RedisSlidingWindowLimiter(client, capacity=1, window_size=0.2)
     assert limiter.allow("expiry-test") is True
@@ -49,10 +49,10 @@ def test_zset_member_uniqueness_under_same_timestamp(monkeypatch):
     same score without unique members, ZADD would silently overwrite instead of adding
     a second entry."""
     client = redis.Redis(host="localhost", port=6379, decode_responses=True)
-    _ = client.delete("throttler:sw:shared-key")
+    _ = client.delete("volter:sw:shared-key")
 
     limiter = RedisSlidingWindowLimiter(client, capacity=2, window_size=5.0)
 
     assert limiter.allow("collision-test") is True
     assert limiter.allow("collision-test") is True
-    assert client.zcard("throttler:sw:collision-test") == 2
+    assert client.zcard("volter:sw:collision-test") == 2

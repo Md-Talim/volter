@@ -1,13 +1,13 @@
-# throttler
+# volter
 
 A fast, thread-safe, and zero-dependency Python rate limiting library featuring highly optimized in-memory limiters.
 
-`throttler` is designed from the ground up for concurrent Python applications. It provides precise, thread-safe rate limiting with a clean API, minimal overhead, and smart algorithmic optimizations.
+`volter` is designed from the ground up for concurrent Python applications. It provides precise, thread-safe rate limiting with a clean API, minimal overhead, and smart algorithmic optimizations.
 
 ## Features
 
-- **Thread-Safe by Design**: Both limiters share a consistent, high-concurrency locking strategy. Instead of locking the entire limiter registry, `throttler` uses fine-grained, per-key locks. This ensures threads checking different keys never block each other.
-- **Amortized $O(1)$ Sliding Window Log**: The naive sliding window log algorithm checks and prunes the entire request log on every request, resulting in $O(N)$ overhead. `throttler` optimizes this to an **amortized $O(1)$** complexity by maintaining a running sum of active token weights and only popping expired entries from the left of a double-ended queue (`deque`).
+- **Thread-Safe by Design**: Both limiters share a consistent, high-concurrency locking strategy. Instead of locking the entire limiter registry, `volter` uses fine-grained, per-key locks. This ensures threads checking different keys never block each other.
+- **Amortized $O(1)$ Sliding Window Log**: The naive sliding window log algorithm checks and prunes the entire request log on every request, resulting in $O(N)$ overhead. `volter` optimizes this to an **amortized $O(1)$** complexity by maintaining a running sum of active token weights and only popping expired entries from the left of a double-ended queue (`deque`).
 - **Zero Dependencies**: Built entirely using Python's standard library (`threading`, `collections.deque`, `time`).
 - **Fully Typed**: Includes a `py.typed` marker file, making it fully compatible with PEP 561 and modern type checkers like Pyright and Mypy.
 
@@ -30,7 +30,7 @@ pip install -e .
 Best for smooth traffic control with support for brief bursts.
 
 ```python
-from throttler import TokenBucketLimiter
+from volter import TokenBucketLimiter
 
 # Capacity of 5 tokens, refills at a rate of 1.0 token per second
 limiter = TokenBucketLimiter(capacity=5, refill_rate=1.0)
@@ -47,7 +47,7 @@ else:
 Best for strict window-based limiting (e.g., max 10 requests per minute) with fractional weight support.
 
 ```python
-from throttler import SlidingWindowLimiter
+from volter import SlidingWindowLimiter
 
 # Capacity of 10 requests/tokens per a 60-second window
 limiter = SlidingWindowLimiter(capacity=10, window_size=60.0)
@@ -74,7 +74,7 @@ This means traffic for `user_a` will never slow down or block traffic for `user_
 
 A naive sliding window log stores every request timestamp and iterates through the entire log to sum active requests on every check.
 
-`throttler` solves this by keeping a running counter (`current_sum`) of the weights currently inside the active window. When a new request arrives:
+`volter` solves this by keeping a running counter (`current_sum`) of the weights currently inside the active window. When a new request arrives:
 
 1. It pops expired timestamps from the left of the `deque` and subtracts their weights from `current_sum` (an efficient $O(1)$ operation per expired element).
 2. It checks if `current_sum + tokens_requested` fits within the capacity.

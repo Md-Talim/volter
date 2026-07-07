@@ -2,7 +2,7 @@ import multiprocessing
 
 import redis
 
-from throttler.redis_token_bucket import RedisTokenBucketLimiter
+from volter.redis_token_bucket import RedisTokenBucketLimiter
 
 
 def _worker(results_queue: multiprocessing.Queue) -> None:
@@ -13,7 +13,7 @@ def _worker(results_queue: multiprocessing.Queue) -> None:
 
 def test_atomic_across_processes():
     client = redis.Redis(host="localhost", port=6379, decode_responses=True)
-    _ = client.delete("throttler:tb:shared-key")  # clean slate
+    _ = client.delete("volter:tb:shared-key")  # clean slate
 
     results_queue = multiprocessing.Queue()
     processes = [

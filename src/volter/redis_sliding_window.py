@@ -42,7 +42,7 @@ class RedisSlidingWindowLimiter:
         capacity: int,
         window_size: float,
         ttl: int | None = None,
-        key_prefix: str = "throttler:sw",
+        key_prefix: str = "volter:sw",
     ):
         self.capacity = capacity
         self.window_size = window_size

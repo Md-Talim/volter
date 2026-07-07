@@ -1,7 +1,7 @@
 import time
 from concurrent.futures.thread import ThreadPoolExecutor
 
-from throttler.sliding_window import SlidingWindowLimiter
+from volter.sliding_window import SlidingWindowLimiter
 
 
 def test_burst_up_to_capacity_succeeds():

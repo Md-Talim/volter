@@ -51,7 +51,7 @@ class RedisTokenBucketLimiter:
         capacity: int,
         refill_rate: float,
         ttl: int = 3600,
-        key_prefix: str = "throttler:tb",
+        key_prefix: str = "volter:tb",
     ):
         self.capacity = capacity
         self.refill_rate = refill_rate

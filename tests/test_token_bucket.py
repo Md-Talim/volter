@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 
-from throttler import TokenBucketLimiter
+from volter import TokenBucketLimiter
 
 
 def test_concurrent_requests_respect_capacity():
