@@ -19,6 +19,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.5.0",
     "pytest>=9.1.1",
     "uvicorn>=0.50.2",
 ]
