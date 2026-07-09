@@ -8,14 +8,16 @@ from typing import final
 class _Bucket:
     tokens: float
     last_refill: float
+    last_access: float = 0.0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 @final
 class TokenBucketLimiter:
-    def __init__(self, capacity: int, refill_rate: float):
+    def __init__(self, capacity: int, refill_rate: float, max_idle: float = 0.0):
         self.capacity = capacity
         self.refill_rate = refill_rate
+        self.max_idle = max_idle or (capacity / refill_rate) * 2
         self._buckets: dict[str, _Bucket] = {}
         self._buckets_lock = threading.Lock()
 
@@ -31,6 +33,15 @@ class TokenBucketLimiter:
                 self._buckets[key] = bucket
             return bucket
 
+    def _evict_stale(self, now: float) -> None:
+        with self._buckets_lock:
+            stale = [
+                k for k, b in self._buckets.items()
+                if now - b.last_access > self.max_idle
+            ]
+            for k in stale:
+                del self._buckets[k]
+
     def allow(self, key: str, tokens_requested: float = 1.0) -> bool:
         bucket = self._get_bucket(key)
 
@@ -41,8 +52,13 @@ class TokenBucketLimiter:
                 self.capacity, bucket.tokens + (elapsed * self.refill_rate)
             )
             bucket.last_refill = now
+            bucket.last_access = now
 
             if bucket.tokens >= tokens_requested:
                 bucket.tokens -= tokens_requested
-                return True
-            return False
+                allowed = True
+            else:
+                allowed = False
+
+        self._evict_stale(now)
+        return allowed
