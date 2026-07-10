@@ -1,3 +1,4 @@
+from unittest.mock import patch
 import time
 from concurrent.futures.thread import ThreadPoolExecutor
 
@@ -35,3 +36,38 @@ def test_concurrent_request_capacity():
 
         results = list(pool.map(allow_request, range(20)))
     assert sum(results) == 10
+
+
+def test_stale_logs_are_evicted():
+    limiter = SlidingWindowLimiter(capacity=5, window_size=1.0, max_idle=5)
+
+    limiter.allow("stale-key")
+    assert "stale-key" in limiter._logs
+
+    # Jump forward past max_idle
+    with patch.object(time, "monotonic", return_value=time.monotonic() + 10):
+        limiter.allow("fresh-key")
+
+    assert "stale-key" not in limiter._logs
+    assert "fresh-key" in limiter._logs
+
+def test_active_logs_survive_eviction():
+    limiter = SlidingWindowLimiter(capacity=5, window_size=1.0, max_idle=5)
+
+    limiter.allow("active-key")
+    limiter.allow("idle-key")
+
+    # Jump forward 3s (under max_idle), touch only active-key
+    t = time.monotonic() + 3
+    with patch.object(time, "monotonic", return_value=t):
+        limiter.allow("active-key")
+
+    # Jump forward another 3s (total 6s for idle-key, 3s for active-key)
+    t2 = t + 3
+    with patch.object(time, "monotonic", return_value=t2):
+        limiter.allow("trigger-key")
+
+    assert "active-key" in limiter._logs
+    assert "idle-key" not in limiter._logs
+
+    

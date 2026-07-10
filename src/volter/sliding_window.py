@@ -11,14 +11,16 @@ class _Log:
     entries: deque[tuple[float, float]] = field(default_factory=deque)
     # Total weight (sum of tokens/requests) currently in the queue
     current_sum: float = 0.0
+    last_access: float = 0.0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 @final
 class SlidingWindowLimiter:
-    def __init__(self, capacity: int, window_size: float):
+    def __init__(self, capacity: int, window_size: float, max_idle: float = 0.0):
         self.capacity = capacity
         self.window_size = window_size
+        self.max_idle = max_idle or window_size * 2
         self._logs: dict[str, _Log] = {}
         self._logs_lock = threading.Lock()
 
@@ -34,12 +36,22 @@ class SlidingWindowLimiter:
                 self._logs[key] = log
             return log
 
+    def _evict_stale(self, now: float) -> None:
+        with self._logs_lock:
+            stale = [
+                k for k, log in self._logs.items()
+                if now - log.last_access > self.max_idle
+            ]
+            for k in stale:
+                del self._logs[k]
+
     def allow(self, key: str, tokens_requested: float = 1.0) -> bool:
         log = self._get_log(key)
 
         with log.lock:
             now = time.monotonic()
             cutoff = now - self.window_size
+            log.last_access = now
 
             while log.entries and log.entries[0][0] <= cutoff:
                 _, weight = log.entries.popleft()
@@ -48,6 +60,9 @@ class SlidingWindowLimiter:
             if log.current_sum + tokens_requested <= self.capacity:
                 log.entries.append((now, tokens_requested))
                 log.current_sum += tokens_requested
-                return True
+                allowed = True
+            else:
+                allowed = False
 
-            return False
+        self._evict_stale(now)
+        return allowed
