@@ -1,11 +1,16 @@
 # volter
 
-A rate limiting library for Python, implementing **token bucket** and **sliding window log** algorithms, each with an in-memory backend and a Redis-backed backend for multi-process correctness. Ships with FastAPI middleware for drop-in use.
+[![PyPI version](https://img.shields.io/pypi/v/volter.svg)](https://pypi.org/project/volter/)
+[![Python versions](https://img.shields.io/pypi/pyversions/volter.svg)](https://img.shields.io/pypi/pyversions/volter.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+A high-performance, production-grade rate limiting library for Python. Volter implements **Token Bucket** and **Sliding Window Log** algorithms with thread-safe in-memory backends and distributed Redis backends. It also ships with drop-in FastAPI middleware.
 
 ```python
 from volter import TokenBucketLimiter
 
-limiter = TokenBucketLimiter(capacity=10, refill_rate=1)  # 10 requests, refills 1/sec
+# Initialize a limiter: 10 burst capacity, refills at 1 token/sec
+limiter = TokenBucketLimiter(capacity=10, refill_rate=1.0)
 
 if limiter.allow("user:123"):
     process_request()
@@ -13,133 +18,266 @@ else:
     reject_with_429()
 ```
 
-## Why this exists
+Most rate limiter tutorials stop at a single, basic algorithm running in a single process. Volter provides production-ready implementations of multiple algorithms with genuinely different tradeoffs. It explicitly addresses concurrency race conditions—from in-process thread-safety to multi-process correctness across distributed app servers.
 
-Most rate limiter examples online implement one algorithm, in memory, in a single file, and stop there. That's fine for a demo but doesn't reflect how rate limiting actually gets used in production: behind a load balancer, across multiple app instances, sharing state that has to stay correct under concurrent access. This project implements two different algorithms with genuinely different tradeoffs, and takes each one from "correct in a single process" to "correct across N processes sharing Redis" — including the concurrency bugs that show up at each step and how they were fixed.
+[Quick Start](#quick-start) • [Architecture & Design](#architecture--design) • [API Reference](#api-reference) • [Engineering Highlights (Why Volter?)](#engineering-highlights) • [Development & Testing](#development--testing)
+
+## Key Features
+
+- **Zero Third-Party Dependencies** in the core package (`TokenBucketLimiter`, `SlidingWindowLimiter`).
+- **Amortized $O(1)$ Sliding Window Log** performance utilizing a running total approach.
+- **Lock-Free Read Paths** for established keys using thread-safe double-checked locking in-memory.
+- **Distributed Multi-Process Safety** utilizing atomic Redis Lua scripts.
+- **Clock Drift Resilience** via `time.monotonic()` and Redis server-side `TIME` commands.
+- **FastAPI Middleware** that conforms to Python `Protocol` typing, working out-of-the-box with any limiter backend.
 
 ## Installation
 
+Install only what you need. Core limiters have **zero dependencies**. The `redis` and `fastapi` extras are loaded lazily, so you never pull in libraries you do not use.
+
 ```bash
-pip install volter              # core only — in-memory limiters, zero dependencies
-pip install volter[redis]       # + Redis-backed limiters
-pip install volter[fastapi]     # + FastAPI middleware
-pip install volter[redis,fastapi]  # everything
+# Core only: In-memory limiters (zero dependencies)
+pip install volter
+
+# In-memory + Redis-backed limiters
+pip install volter[redis]
+
+# In-memory + FastAPI middleware
+pip install volter[fastapi]
+
+# Full suite: In-memory, Redis, and FastAPI middleware
+pip install volter[redis,fastapi]
 ```
 
-The core package (`TokenBucketLimiter`, `SlidingWindowLimiter`) has **no third-party dependencies**. `redis` and `fastapi` are only imported inside their own modules (`redis_token_bucket.py`, `redis_sliding_window.py`, `fastapi_middleware.py`), so installing the bare package never forces you to pull in libraries you don't need. Importing one of those modules without installing its extra fails with a plain `ModuleNotFoundError` — that's expected, not a bug.
+## Quick Start
 
-## The two algorithms, and why both exist
+### 1. In-Memory Rate Limiting (Single-Instance, Thread-Safe)
 
-|                    | Token Bucket                                                                     | Sliding Window Log                                                      |
-| ------------------ | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| **Memory per key** | O(1) — two numbers (`tokens`, `last_refill`)                                     | O(requests in window) — one entry per allowed request until it ages out |
-| **Precision**      | Approximate, allows short bursts up to `capacity`, then smooths to `refill_rate` | Exact count over the exact window, no averaging                         |
-| **Best for**       | APIs that tolerate bursty-then-steady traffic (most APIs)                        | Cases where an exact count matters more than memory cost                |
+```python
+from volter import TokenBucketLimiter, SlidingWindowLimiter
 
-Neither algorithm is strictly better — this is a genuine engineering tradeoff, not a "pick the fancier one" situation. Token bucket's O(1) memory comes at the cost of not tracking individual requests, which is exactly what gives it burst tolerance. Sliding window log's exact precision comes at the cost of storing a timestamp per request, which is exactly what gives it precision.
+# Token Bucket: Best for smoothing steady traffic with short burst capacity
+# Allows bursts of up to 10 requests, refilling at 1 token per second
+bucket = TokenBucketLimiter(capacity=10, refill_rate=1.0)
 
-## Design decisions
+# Sliding Window Log: Best for strict interval counts (e.g., max 100 requests per minute)
+window = SlidingWindowLimiter(capacity=100, window_size=60.0)
 
-### Per-key locking, not one global lock
+# Evaluate if a request should be processed
+if bucket.allow("client_ip_or_user_id"):
+    # Process request...
+    pass
+```
 
-Every in-memory limiter manages many independent buckets/logs — one per key (e.g. per user, per IP). Concurrency safety is implemented at **two levels**:
+### 2. Redis-Backed Rate Limiting (Distributed, Multi-Process)
 
-- An outer lock (`_buckets_lock` / `_logs_lock`) guards only the _creation_ of a new key's state, held very briefly.
-- A per-key lock guards the actual read-compute-write logic for that one key.
+```python
+import redis
+from volter.redis_token_bucket import RedisTokenBucketLimiter
+from volter.redis_sliding_window import RedisSlidingWindowLimiter
 
-This means a request for `user:123` never blocks a concurrent request for `user:456` — they hold different locks entirely. A single global lock would serialize _all_ traffic regardless of key, which defeats much of the point under real concurrent load.
+r = redis.Redis(host="localhost", port=6379, decode_responses=True)
 
-**Double-checked locking** is used for bucket/log creation: the common path (key already exists) reads the dict without taking any lock at all; the outer lock is only paid once, the first time a new key appears.
+# Token Bucket sharing state across multiple web-server processes
+bucket = RedisTokenBucketLimiter(redis_client=r, capacity=100, refill_rate=10.0)
 
-### `time.monotonic()`, not `time.time()`
+# Sliding Window Log sharing state across multiple web-server processes
+window = RedisSlidingWindowLimiter(redis_client=r, capacity=100, window_size=60.0)
+```
 
-Elapsed-time calculations (used in token bucket's refill and sliding window's cutoff) use `time.monotonic()` deliberately. `time.time()` is wall-clock time and can jump backward — NTP sync, manual clock changes, VM pause/resume — which would make `elapsed` negative and corrupt the refill/eviction math. `time.monotonic()` is guaranteed never to go backward within a process.
+### 3. FastAPI Middleware
 
-### `current_sum` running total instead of summing on every call (sliding window)
-
-A naive sliding window log recomputes its count by iterating every entry in the window on each call — O(n) per request. This implementation instead maintains a running total (`current_sum`) that's only adjusted as entries are evicted or added, making each call O(k) where k is just the number of _expired_ entries evicted that round — amortized O(1), not O(n).
-
-### Weighted requests (`tokens_requested`)
-
-Both in-memory limiters accept an optional `tokens_requested` parameter (default `1`), so a single call can represent a variable-cost request — e.g. a search endpoint costing 1 unit vs. a bulk export costing 20, the same pattern used by GitHub's and Stripe's own rate limiters. Callers who don't need this never have to think about it; the default keeps the simple case simple.
-
-**This is dropped in the Redis-backed MVP** — see below.
-
-## Redis-backed limiters: why Lua, and what it's doing
-
-### The problem
-
-The in-memory implementation protects its read-compute-write sequence with a `threading.Lock`. That works because all callers share one process's memory. Across multiple app server processes, there's no shared memory to hold a lock in — and Redis itself doesn't give you multi-command atomicity for free: `HMGET` → compute → `HSET` is three separate round trips, and another process can read the same stale value in between, causing both to compute independently off the same starting point (the same check-then-act race the in-process lock was preventing, just relocated).
-
-Redis is single-threaded: any _single_ command is atomic with respect to every other client, because the event loop never interleaves commands. A Lua script sent via `EVAL`/`EVALSHA` runs as **one command** from the event loop's perspective — nothing else executes while it runs. The script becomes the critical section: the same role `bucket.lock` played in-process, just relocated into Redis's own execution model instead of a Python-level mutex.
-
-`MULTI`/`EXEC` was considered and rejected for this: it queues commands atomically but doesn't let you branch on a value read _inside_ the transaction without an additional `WATCH` + optimistic-retry dance. A Lua script can read, branch, and write in one indivisible step, which maps directly onto this algorithm's logic.
-
-### Token bucket (Redis)
-
-Implemented as a Lua script operating on a Redis hash (`tokens`, `last_refill` fields):
-
-1. Read current `tokens` / `last_refill` from the hash (or treat as a fresh bucket if the key doesn't exist).
-2. Compute elapsed time using Redis's own `TIME` command — **not** a timestamp passed in from Python — so there's no clock-skew risk between different app servers with slightly different clocks.
-3. Refill, check against capacity, decrement if allowed, write back with `HSET`.
-4. `EXPIRE` the key with a configurable TTL.
-
-`register_script()` (via `redis-py`) handles caching the script server-side and automatically falls back from `EVALSHA` to a full `EVAL` if Redis responds `NOSCRIPT` (e.g. after a restart or `SCRIPT FLUSH`) — no manual `SCRIPT LOAD` management needed.
-
-### Sliding window log (Redis)
-
-Implemented using a Redis **sorted set** (ZSET) — score = timestamp, member = a unique ID per request:
-
-1. `ZREMRANGEBYSCORE key -inf cutoff` — evict every member scored at or below the cutoff. This is the direct Redis-native equivalent of the in-memory version's `while entries[0][0] <= cutoff: popleft()` loop, and it's cheap for the same reason: a sorted set is backed by a skip list, so eviction walks from the low end and stops as soon as it clears the cutoff, rather than scanning every member.
-2. `ZCARD key` — count remaining members. This plays the same role `current_sum` played in-process.
-3. If under capacity, `ZADD key now member_id` and `EXPIRE`.
-
-**Why a unique member ID, not the timestamp as the member:** a sorted set's members are unique — adding the same member twice just updates its score rather than creating a second entry. If the timestamp itself were used as the member, two requests landing at the same microsecond (plausible under real load, since Redis's `TIME` has microsecond resolution) would collide, and the second `ZADD` would silently overwrite the first instead of adding a new entry — undercounting real traffic and letting more requests through than the configured capacity. A `uuid4` generated per request guarantees two simultaneous requests still occupy two distinct ZSET entries. The score does the "when" work; the member does the "this is one distinct, countable event" work — deliberately decoupled.
-
-**Why the UUID is generated in Python, not inside the Lua script:** Redis requires scripts to be deterministic, since their effects (not the script itself) get replicated to replicas — calls to random number generators or non-`TIME` clock reads aren't available inside a script for this reason. Randomness has to be manufactured outside the script and passed in as an argument.
-
-### Advantage of the Redis-backed version: expiry is built in
-
-The in-memory limiters have a known, documented limitation (see below): their internal dict of per-key state grows forever, since nothing ever removes an entry once a key has been seen. The Redis-backed versions don't have this problem — every write is paired with an `EXPIRE`, so idle keys clean themselves up naturally as part of Redis's own key expiry mechanism. No manual cleanup logic was needed to get this for free.
-
-### Dropped from the Redis MVP: weighted `tokens_requested`
-
-The in-memory limiters support a variable request cost via `tokens_requested`. This is intentionally **not** carried over to the Redis-backed sliding window implementation in this MVP — supporting it would mean encoding a weight into each ZSET member and summing weights on read instead of a plain `ZCARD` count, adding real complexity for a feature not yet exercised elsewhere in the project. This is a deliberate scope cut, not an oversight; extending it is a natural next step (see below).
-
-### Verifying atomicity: multi-process tests, not multi-thread
-
-The in-memory limiters' concurrency tests use `ThreadPoolExecutor` — sufficient there because threads share process memory, so it genuinely exercises the `threading.Lock`. That same approach would prove nothing for the Redis-backed versions, since the whole point is correctness **across separate processes** that share no memory at all. Their tests instead spin up real OS processes (`multiprocessing.Process`), each with its own Redis client, all hammering the same key concurrently, and assert that exactly `capacity` requests succeed — no over-admission, despite zero shared process state.
-
-## FastAPI middleware
+Add rate limiting to your entire FastAPI application in three lines of code:
 
 ```python
 from fastapi import FastAPI
-from volter.token_bucket import TokenBucketLimiter
+from volter import TokenBucketLimiter
 from volter.fastapi_middleware import RateLimitMiddleware
 
 app = FastAPI()
-limiter = TokenBucketLimiter(capacity=5, refill_rate=1)
+limiter = TokenBucketLimiter(capacity=5, refill_rate=1.0)
+
+# Out-of-the-box middleware (rejects with a 429 status code and 'Retry-After: 1' header)
 app.add_middleware(RateLimitMiddleware, limiter=limiter)
 ```
 
-Rejected requests get a `429` with a `Retry-After` header. The middleware is written against a `Protocol` (anything with `.allow(key, tokens_requested) -> bool`), not a concrete class — it works unmodified with any of the four limiter implementations, which is a direct payoff of keeping all four classes' interfaces identical from the start. The rate-limit key defaults to client IP but accepts a custom `key_func`, e.g. to key by API key or authenticated user ID instead.
+You can customize the rate limit key (e.g., using an API key or route instead of client IP) using a custom `key_func`:
 
-## Known limitations / natural next steps
-
-- **In-memory dict growth**: `_buckets` / `_logs` never evict entries for keys that stop being used — every key ever seen stays in memory for the process lifetime. A TTL-based eviction (e.g. a background sweep, or lazy eviction on access) would be the natural fix. The Redis-backed versions don't share this problem, since `EXPIRE` handles it natively.
-- **Weighted requests on the Redis sliding window**: dropped from this MVP, as explained above — implementable by encoding weight into ZSET members and summing instead of counting.
-- **`Retry-After` is currently a fixed placeholder**, not computed from actual time-until-next-allowed-request. Each algorithm could expose a `retry_after(key) -> float` method (token bucket: time until enough tokens accumulate; sliding window: time until the oldest entry expires) for the middleware to report precisely instead of a constant.
-
-## Development
-
-```bash
-uv sync --all-extras       # install everything, including redis/fastapi extras and dev deps
-uv run pytest              # run the full test suite
-uv run pytest -v tests/test_redis_token_bucket.py   # requires a local Redis (see below)
+```python
+app.add_middleware(
+    RateLimitMiddleware,
+    limiter=limiter,
+    key_func=lambda request: request.headers.get("X-API-Key", "anonymous"),
+)
 ```
 
-Redis-backed tests need a running Redis instance:
+## Architecture & Design
+
+Volter is designed with performance, correctness, and low resource overhead in mind.
+
+![Volter Architecture](assets/volter-architecture.png)
+
+### 1. Fine-Grained Key Locking (In-Memory)
+
+Instead of protecting the entire limiter database with a single global lock—which would serialize all incoming API requests and severely bottle-neck throughput—Volter uses **two-level locking**:
+
+- A global dictionary-level lock (`_buckets_lock` / `_logs_lock`) is used **only** when initializing a state tracker for a new key.
+- A **double-checked locking** pattern is used: if the key already exists, we retrieve it lock-free. We only acquire the global lock if the key is absent.
+- A fine-grained, per-key lock (`bucket.lock` / `log.lock`) is acquired to perform the read-compute-write sequence for that specific user.
+
+Thus, concurrent requests for `user:123` never block concurrent requests for `user:456`.
+
+### 2. Amortized $O(1)$ Sliding Window Log
+
+A naive sliding window log recalculates the active count on every request by iterating over the entire queue of timestamps—an $O(N)$ operation where $O(N)$ is the number of requests in the window.
+
+Volter optimizes this to **amortized $O(1)$** by maintaining a running sum (`current_sum`) for each key. When a request arrives, we evict only the expired records from the front of the queue and decrement our running total accordingly. Each evaluation is $O(k)$ where $k$ is the number of expired entries in that tick, resulting in an amortized $O(1)$ operational cost.
+
+### 3. Clock-Drift and VM-Pause Protection
+
+- **In-Memory**: Standard clock mechanisms like `time.time()` represent wall-clock time and can jump backward or forward (due to NTP syncs, VM suspends, or manual clock alterations), breaking rate-limiting math. Volter exclusively uses `time.monotonic()` in-memory, ensuring elapsed time calculations are guaranteed to be forward-only.
+- **Distributed (Redis)**: Different application servers can suffer from clock skew relative to each other. To avoid this, Volter's Redis scripts call Redis's own `TIME` command to retrieve the central Redis clock timestamp, neutralizing clock-skew issues completely.
+
+## API Reference
+
+### In-Memory Limiters
+
+#### `TokenBucketLimiter`
+
+_Implements the Token Bucket algorithm. Best for most APIs. Allows a burst of up to `capacity` requests, smooths down to a steady rate of `refill_rate` per second._
+
+- **Constructor**:
+    ```python
+    TokenBucketLimiter(capacity: int, refill_rate: float, max_idle: float = 0.0)
+    ```
+    - `capacity`: Maximum number of tokens the bucket can hold.
+    - `refill_rate`: How many tokens are added to the bucket per second.
+    - `max_idle`: How long (in seconds) a key can go untouched before its internal state is evicted from memory to save space. Defaults to `(capacity / refill_rate) * 2`.
+- **Methods**:
+    - `allow(key: str, tokens_requested: float = 1.0) -> bool`: Returns `True` if the bucket contains at least `tokens_requested` tokens. If so, consumes them.
+
+#### `SlidingWindowLimiter`
+
+_Implements the Sliding Window Log algorithm. Best for precise limit enforcement over strict intervals._
+
+- **Constructor**:
+    ```python
+    SlidingWindowLimiter(capacity: int, window_size: float, max_idle: float = 0.0)
+    ```
+    - `capacity`: Total allowed weighted units inside the sliding window.
+    - `window_size`: The duration of the sliding window in seconds.
+    - `max_idle`: How long (in seconds) a key can remain idle before eviction. Defaults to `window_size * 2`.
+- **Methods**:
+    - `allow(key: str, tokens_requested: float = 1.0) -> bool`: Returns `True` if adding `tokens_requested` keeps the total weight within `capacity` for the sliding window.
+
+### Redis-Backed Limiters
+
+#### `RedisTokenBucketLimiter`
+
+_Distributed Token Bucket. Utilizes a Redis hash storing `tokens` and `last_refill` attributes._
+
+- **Constructor**:
+    ```python
+    RedisTokenBucketLimiter(redis_client: redis.Redis, capacity: int, refill_rate: float, ttl: int = 3600, key_prefix: str = "volter:tb")
+    ```
+    - `redis_client`: A `redis-py` client instance.
+    - `capacity`: Maximum capacity of the token bucket.
+    - `refill_rate`: Refill rate in tokens per second.
+    - `ttl`: Time-to-live in seconds for idle keys. Enables automated self-cleanup of stale keys in Redis.
+    - `key_prefix`: Prefix added to keys inside Redis to avoid namespace collisions.
+- **Methods**:
+    - `allow(key: str, tokens_requested: float = 1.0) -> bool`: Atomic check-and-consume via evaluated server-side Lua script.
+
+#### `RedisSlidingWindowLimiter`
+
+_Distributed Sliding Window. Utilizes a Redis Sorted Set (ZSET) where elements represent individual requests._
+
+- **Constructor**:
+    ```python
+    RedisSlidingWindowLimiter(redis_client: redis.Redis, capacity: int, window_size: float, ttl: int | None = None, key_prefix: str = "volter:sw")
+    ```
+    - `redis_client`: A `redis-py` client instance.
+    - `capacity`: Exact request capacity allowed inside the window.
+    - `window_size`: Size of the sliding window in seconds.
+    - `ttl`: Redis key TTL. Defaults to `int(window_size) + 1`.
+    - `key_prefix`: Redis key prefix.
+- **Methods**:
+    - `allow(key: str) -> bool`: Atomic sliding-window calculation using a Redis Sorted Set.
+
+### FastAPI Middleware
+
+#### `RateLimitMiddleware`
+
+_An ASGI middleware designed to catch and enforce rate limits globally or on a custom key basis._
+
+- **Constructor**:
+    ```python
+    RateLimitMiddleware(app: ASGIApp, limiter: _Limiter, key_func: Callable[[Request], str] = _default_key_func, tokens_requested: float = 1.0)
+    ```
+    - `app`: The ASGI application instance.
+    - `limiter`: Any rate limiter implementation conforming to the `_Limiter` protocol (must implement `allow(key: str, tokens_requested: float) -> bool`).
+    - `key_func`: A callable accepting a FastAPI `Request` and returning a `str` used as the rate-limiting key. Defaults to returning the client's host IP.
+    - `tokens_requested`: The default weight/token cost applied to requests intercepted by this middleware.
+
+## Engineering Highlights
+
+This library was built with a deep understanding of standard distributed system failures, concurrency issues, and efficiency optimizations.
+
+### 1. Atomic Lua Scripting vs. Optimistic Locking
+
+In a distributed setup with multiple application servers, rate limiting requires atomicity. A naive implementation using a sequence of commands (e.g., `GET` -> compute -> `SET`) creates a classic **check-then-act race condition** where concurrent processes read stale states and bypass limits.
+
+Volter solves this by packaging the logic inside **indivisible Lua scripts** executed on the Redis server:
+
+- Since Redis is single-threaded, a Lua script runs completely uninterrupted as a single command, neutralizing race conditions without requiring global distributed locks.
+- We chose Lua scripts over standard `MULTI/EXEC` pipelines because `MULTI/EXEC` cannot branch mid-transaction based on read results without utilizing expensive optimistic locking retry loops (`WATCH` commands).
+
+### 2. High-Performance Redis Sorted Set Collisions Bypass
+
+In the `RedisSlidingWindowLimiter`, we store requests inside a Redis sorted set (ZSET). Redis ZSETs require members to be unique.
+
+- If we stored raw timestamps as the ZSET members, two concurrent requests arriving within the exact same microsecond would collision, overwriting each other and leading to an undercount (allowing clients to bypass limits).
+- Volter solves this by generating a unique UUID4 in Python for each request and storing the UUID as the member, while the epoch timestamp is stored as the ZSET score. This ensures every single request occupies a distinct node in Redis's skip-list.
+- **Why generate UUIDs in Python instead of inside Lua?** Redis replication requires Lua scripts to be strictly deterministic. Using random-number or UUID generators inside a Lua script is restricted as it breaks replication safety. Generating the UUID in Python keeps the Lua script deterministic and replication-safe.
+
+### 3. Comprehensive Verification (True Multi-Process Integration Tests)
+
+To guarantee that the concurrency safety mechanisms are production-ready, Volter avoids testing concurrency purely with greenlets or thread-pools.
+
+Our Redis integration tests spin up true operating-system processes (`multiprocessing.Process`), each holding its own independent Redis connection. These processes hammer the Redis-backed limiters concurrently. The test suite asserts that the exact specified capacity limit is enforced to the single request, validating Volter's thread/process safety guarantees in high-concurrency environments.
+
+## Known Limitations & Roadmap
+
+- **Passive In-Memory Eviction**: Memory cleanup is done on-demand during subsequent calls to `.allow()`. If a key becomes completely idle and is never called again, it remains in memory until a sweep is triggered. A proactive, background worker sweep is a planned enhancement.
+- **Static Retry-After Header**: The FastAPI middleware currently returns a static `Retry-After: 1` header. Calculating and returning the exact millisecond-precision wait time for each algorithm is on the roadmap.
+- **Weighted Requests for Redis Sliding Window**: The Redis sliding window currently counts requests with a static weight of $1$. Encoding weights inside ZSET members to support varying weights is a natural next step.
+
+## Development & Testing
+
+### 1. Setup Environment
+
+Volter utilizes `uv` for modern, lightning-fast Python package and dependency management.
 
 ```bash
+# Sync all virtual environment and dev dependencies
+uv sync --all-extras
+```
+
+### 2. Running Tests
+
+The test suite consists of unit tests, in-memory concurrency tests, and Redis integration tests.
+
+```bash
+# Run the full test suite
+uv run pytest
+```
+
+To run the Redis-backed integration tests, you must have a local Redis instance running. You can easily boot one up using Docker:
+
+```bash
+# Launch local Redis
 docker run -d --name volter-redis -p 6379:6379 redis:7-alpine
+
+# Run the Redis tests
+uv run pytest -v tests/test_redis_token_bucket.py tests/test_redis_sliding_window.py
 ```
