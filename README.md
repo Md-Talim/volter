@@ -2,6 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/volter.svg)](https://pypi.org/project/volter/)
 [![Python versions](https://img.shields.io/pypi/pyversions/volter.svg)](https://img.shields.io/pypi/pyversions/volter.svg)
+![GitHub release (latest by date)](https://img.shields.io/github/v/release/md-talim/volter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A high-performance, production-grade rate limiting library for Python. Volter implements **Token Bucket** and **Sliding Window Log** algorithms with thread-safe in-memory backends and distributed Redis backends. It also ships with drop-in FastAPI middleware.
