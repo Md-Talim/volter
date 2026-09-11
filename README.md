@@ -4,6 +4,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/volter.svg)](https://img.shields.io/pypi/pyversions/volter.svg)
 ![GitHub release (latest by date)](https://img.shields.io/github/v/release/md-talim/volter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/md-talim/volter/actions/workflows/ci.yml/badge.svg)](https://github.com/md-talim/volter/actions/workflows/ci.yml)
 
 A high-performance, production-grade rate limiting library for Python. Volter implements **Token Bucket** and **Sliding Window Log** algorithms with thread-safe in-memory backends and distributed Redis backends. It also ships with drop-in FastAPI middleware.
 
@@ -19,7 +20,7 @@ else:
     reject_with_429()
 ```
 
-Most rate limiter tutorials stop at a single, basic algorithm running in a single process. Volter provides production-ready implementations of multiple algorithms with genuinely different tradeoffs. It explicitly addresses concurrency race conditions—from in-process thread-safety to multi-process correctness across distributed app servers.
+Most rate limiter tutorials stop at a single, basic algorithm running in a single process. Volter provides production-ready implementations of multiple algorithms with genuinely different tradeoffs. It explicitly addresses concurrency race conditions, from in-process thread-safety to multi-process correctness across distributed app servers.
 
 [Quick Start](#quick-start) • [Architecture & Design](#architecture--design) • [API Reference](#api-reference) • [Engineering Highlights (Why Volter?)](#engineering-highlights) • [Development & Testing](#development--testing)
 
@@ -120,7 +121,7 @@ Volter is designed with performance, correctness, and low resource overhead in m
 
 ### 1. Fine-Grained Key Locking (In-Memory)
 
-Instead of protecting the entire limiter database with a single global lock—which would serialize all incoming API requests and severely bottle-neck throughput—Volter uses **two-level locking**:
+Instead of protecting the entire limiter database with a single global lock, which would serialize all incoming API requests and severely bottle-neck throughput, Volter uses **two-level locking**:
 
 - A global dictionary-level lock (`_buckets_lock` / `_logs_lock`) is used **only** when initializing a state tracker for a new key.
 - A **double-checked locking** pattern is used: if the key already exists, we retrieve it lock-free. We only acquire the global lock if the key is absent.
@@ -130,7 +131,7 @@ Thus, concurrent requests for `user:123` never block concurrent requests for `us
 
 ### 2. Amortized $O(1)$ Sliding Window Log
 
-A naive sliding window log recalculates the active count on every request by iterating over the entire queue of timestamps—an $O(N)$ operation where $O(N)$ is the number of requests in the window.
+A naive sliding window log recalculates the active count on every request by iterating over the entire queue of timestamps, an $O(N)$ operation where $O(N)$ is the number of requests in the window.
 
 Volter optimizes this to **amortized $O(1)$** by maintaining a running sum (`current_sum`) for each key. When a request arrives, we evict only the expired records from the front of the queue and decrement our running total accordingly. Each evaluation is $O(k)$ where $k$ is the number of expired entries in that tick, resulting in an amortized $O(1)$ operational cost.
 
