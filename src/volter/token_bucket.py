@@ -28,7 +28,7 @@ class TokenBucketLimiter:
             max_idle
             or (capacity / refill_rate if refill_rate > 0 else float("inf")) * 2
         )
-        self.evict_every = 128
+        self.evict_every = evict_every
         self.evict_interval = evict_interval or self.max_idle / 4
         self._call_count = 0
         self._last_sweep = time.monotonic()
