@@ -1,6 +1,6 @@
 [project]
 name = "volter"
-version = "0.1.1"
+version = "0.1.2"
 description = "Rate limiting library with token bucket and sliding window algorithms, in-memory and Redis-backed"
 readme = "README.md"
 license = "MIT"
@@ -9,6 +9,11 @@ authors = [
     { name = "Md. Talim", email = "talimmohammad116@gmail.com" }
 ]
 requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
 dependencies = []
 
 [project.optional-dependencies]
