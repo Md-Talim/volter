@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/md-talim/volter/actions/workflows/ci.yml/badge.svg)](https://github.com/md-talim/volter/actions/workflows/ci.yml)
 
-A high-performance, production-grade rate limiting library for Python. Volter implements **Token Bucket** and **Sliding Window Log** algorithms with thread-safe in-memory backends and distributed Redis backends. It also ships with drop-in FastAPI middleware.
+A rate limiting library for Python. It implements **Token Bucket** and **Sliding Window Log**, with in-memory backends that use only the standard library and Redis-backed backends for shared state, plus FastAPI middleware. Redis and FastAPI are optional extras.
 
 ```python
 from volter import TokenBucketLimiter
@@ -20,22 +20,22 @@ else:
     reject_with_429()
 ```
 
-Most rate limiter tutorials stop at a single, basic algorithm running in a single process. Volter provides production-ready implementations of multiple algorithms with genuinely different tradeoffs. It explicitly addresses concurrency race conditions, from in-process thread-safety to multi-process correctness across distributed app servers.
+The in-memory limiters are thread-safe within a single process. The Redis-backed limiters enforce limits across multiple processes and application servers.
 
-[Quick Start](#quick-start) • [Architecture & Design](#architecture--design) • [API Reference](#api-reference) • [Engineering Highlights (Why Volter?)](#engineering-highlights) • [Development & Testing](#development--testing)
+[Quick Start](#quick-start) • [Architecture & Design](#architecture--design) • [API Reference](#api-reference) • [Development & Testing](#development--testing)
 
 ## Key Features
 
 - **Zero Third-Party Dependencies** in the core package (`TokenBucketLimiter`, `SlidingWindowLimiter`).
 - **Amortized $O(1)$ Sliding Window Log** performance utilizing a running total approach.
-- **Lock-Free Read Paths** for established keys using thread-safe double-checked locking in-memory.
+- **Per-Key Locking In-Memory**: established keys skip the global lock; each request takes only its own key's lock for the read-compute-write.
 - **Distributed Multi-Process Safety** utilizing atomic Redis Lua scripts.
 - **Clock Drift Resilience** via `time.monotonic()` and Redis server-side `TIME` commands.
 - **FastAPI Middleware** that conforms to Python `Protocol` typing, working out-of-the-box with any limiter backend.
 
 ## Installation
 
-Install only what you need. Core limiters have **zero dependencies**. The `redis` and `fastapi` extras are loaded lazily, so you never pull in libraries you do not use.
+Install only what you need. The core limiters have **zero dependencies**. The redis and fastapi integrations live in optional extras and are imported only by the modules that use them.
 
 ```bash
 # Core only: In-memory limiters (zero dependencies)
@@ -89,7 +89,7 @@ window = RedisSlidingWindowLimiter(redis_client=r, capacity=100, window_size=60.
 
 ### 3. FastAPI Middleware
 
-Add rate limiting to your entire FastAPI application in three lines of code:
+Add rate limiting to your entire FastAPI application with one `add_middleware` call:
 
 ```python
 from fastapi import FastAPI
@@ -115,8 +115,6 @@ app.add_middleware(
 
 ## Architecture & Design
 
-Volter is designed with performance, correctness, and low resource overhead in mind.
-
 ![Volter Architecture](assets/volter-architecture.png)
 
 ### 1. Fine-Grained Key Locking (In-Memory)
@@ -138,7 +136,30 @@ Volter optimizes this to **amortized $O(1)$** by maintaining a running sum (`cur
 ### 3. Clock-Drift and VM-Pause Protection
 
 - **In-Memory**: Standard clock mechanisms like `time.time()` represent wall-clock time and can jump backward or forward (due to NTP syncs, VM suspends, or manual clock alterations), breaking rate-limiting math. Volter exclusively uses `time.monotonic()` in-memory, ensuring elapsed time calculations are guaranteed to be forward-only.
-- **Distributed (Redis)**: Different application servers can suffer from clock skew relative to each other. To avoid this, Volter's Redis scripts call Redis's own `TIME` command to retrieve the central Redis clock timestamp, neutralizing clock-skew issues completely.
+- **Distributed (Redis)**: Application servers can have clocks skewed relative to each other. Volter's Redis scripts read the timestamp from Redis's own TIME command rather than the caller's clock, so the limit math depends only on the Redis server's clock.
+
+### 4. Atomic Lua Scripting vs. Optimistic Locking
+
+In a distributed setup with multiple application servers, rate limiting requires atomicity. A naive implementation using a sequence of commands (e.g., `GET` -> compute -> `SET`) creates a classic **check-then-act race condition** where concurrent processes read stale states and bypass limits.
+
+Volter solves this by packaging the logic inside **indivisible Lua scripts** executed on the Redis server:
+
+- Since Redis is single-threaded, a Lua script runs completely uninterrupted as a single command, neutralizing race conditions without requiring global distributed locks.
+- We chose Lua scripts over standard `MULTI/EXEC` pipelines because `MULTI/EXEC` cannot branch mid-transaction based on read results without utilizing expensive optimistic locking retry loops (`WATCH` commands).
+
+### 5. Redis Sorted Set Member Uniqueness
+
+In the `RedisSlidingWindowLimiter`, we store requests inside a Redis Sorted Set (ZSET). Redis ZSETs require members to be unique.
+
+- If we stored raw timestamps as the ZSET members, two concurrent requests arriving within the exact same microsecond would collision, overwriting each other and leading to an undercount (allowing clients to bypass limits).
+- Volter solves this by generating a unique UUID4 in Python for each request and storing the UUID as the member, while the epoch timestamp is stored as the ZSET score. This ensures every single request occupies a distinct node in Redis's skip-list.
+- **Why generate UUIDs in Python instead of inside Lua?** Redis replication requires Lua scripts to be strictly deterministic. Using random-number or UUID generators inside a Lua script is restricted as it breaks replication safety. Generating the UUID in Python keeps the Lua script deterministic and replication-safe.
+
+### 6. Multi-Process Verification
+
+The Redis concurrency tests do not rely on greenlets or thread pools.
+
+The Redis integration tests start 20 OS processes (multiprocessing.Process), each with its own Redis connection, and call allow() on the same key concurrently. Both tests assert that exactly capacity (10) calls are allowed, and no more.
 
 ## API Reference
 
@@ -150,7 +171,7 @@ _Implements the Token Bucket algorithm. Best for most APIs. Allows a burst of up
 
 - **Constructor**:
     ```python
-    TokenBucketLimiter(capacity: int, refill_rate: float, max_idle: float = 0.0)
+    TokenBucketLimiter(capacity: int, refill_rate: float, max_idle: float = 0.0, evict_every: int = 128, evict_interval: float = 0.0)
     ```
     - `capacity`: Maximum number of tokens the bucket can hold.
     - `refill_rate`: How many tokens are added to the bucket per second.
@@ -164,7 +185,7 @@ _Implements the Sliding Window Log algorithm. Best for precise limit enforcement
 
 - **Constructor**:
     ```python
-    SlidingWindowLimiter(capacity: int, window_size: float, max_idle: float = 0.0)
+    SlidingWindowLimiter(capacity: int, window_size: float, max_idle: float = 0.0, evict_every: int = 128, evict_interval: float = 0.0)
     ```
     - `capacity`: Total allowed weighted units inside the sliding window.
     - `window_size`: The duration of the sliding window in seconds.
@@ -220,33 +241,6 @@ _An ASGI middleware designed to catch and enforce rate limits globally or on a c
     - `limiter`: Any rate limiter implementation conforming to the `_Limiter` protocol (must implement `allow(key: str, tokens_requested: float) -> bool`).
     - `key_func`: A callable accepting a FastAPI `Request` and returning a `str` used as the rate-limiting key. Defaults to returning the client's host IP.
     - `tokens_requested`: The default weight/token cost applied to requests intercepted by this middleware.
-
-## Engineering Highlights
-
-This library was built with a deep understanding of standard distributed system failures, concurrency issues, and efficiency optimizations.
-
-### 1. Atomic Lua Scripting vs. Optimistic Locking
-
-In a distributed setup with multiple application servers, rate limiting requires atomicity. A naive implementation using a sequence of commands (e.g., `GET` -> compute -> `SET`) creates a classic **check-then-act race condition** where concurrent processes read stale states and bypass limits.
-
-Volter solves this by packaging the logic inside **indivisible Lua scripts** executed on the Redis server:
-
-- Since Redis is single-threaded, a Lua script runs completely uninterrupted as a single command, neutralizing race conditions without requiring global distributed locks.
-- We chose Lua scripts over standard `MULTI/EXEC` pipelines because `MULTI/EXEC` cannot branch mid-transaction based on read results without utilizing expensive optimistic locking retry loops (`WATCH` commands).
-
-### 2. High-Performance Redis Sorted Set Collisions Bypass
-
-In the `RedisSlidingWindowLimiter`, we store requests inside a Redis sorted set (ZSET). Redis ZSETs require members to be unique.
-
-- If we stored raw timestamps as the ZSET members, two concurrent requests arriving within the exact same microsecond would collision, overwriting each other and leading to an undercount (allowing clients to bypass limits).
-- Volter solves this by generating a unique UUID4 in Python for each request and storing the UUID as the member, while the epoch timestamp is stored as the ZSET score. This ensures every single request occupies a distinct node in Redis's skip-list.
-- **Why generate UUIDs in Python instead of inside Lua?** Redis replication requires Lua scripts to be strictly deterministic. Using random-number or UUID generators inside a Lua script is restricted as it breaks replication safety. Generating the UUID in Python keeps the Lua script deterministic and replication-safe.
-
-### 3. Comprehensive Verification (True Multi-Process Integration Tests)
-
-To guarantee that the concurrency safety mechanisms are production-ready, Volter avoids testing concurrency purely with greenlets or thread-pools.
-
-Our Redis integration tests spin up true operating-system processes (`multiprocessing.Process`), each holding its own independent Redis connection. These processes hammer the Redis-backed limiters concurrently. The test suite asserts that the exact specified capacity limit is enforced to the single request, validating Volter's thread/process safety guarantees in high-concurrency environments.
 
 ## Known Limitations & Roadmap
 
