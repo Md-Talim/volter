@@ -1,45 +1,47 @@
 name: CI
 
 on:
-  push:
-  pull_request:
+    push:
+    pull_request:
 
 jobs:
-  test:
-    name: Tests (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    go:
+        name: Go
+        runs-on: ubuntu-latest
 
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12", "3.13"]
+        services:
+            redis:
+                image: redis:7-alpine
+                ports:
+                    - 6379:6379
+                options: >-
+                    --health-cmd "redis-cli ping"
+                    --health-interval 5s
+                    --health-timeout 3s
+                    --health-retries 10
 
-    services:
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        # Health check ensures tests only start once Redis accepts connections
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
+        env:
+            VOLTER_REDIS_URL: redis://localhost:6379/0
 
-    env:
-      UV_PYTHON: ${{ matrix.python-version }}
+        steps:
+            - uses: actions/checkout@v4
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+            - uses: actions/setup-go@v5
+              with:
+                  go-version-file: go.mod
+                  cache: true
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          enable-cache: true
+            - name: Download modules
+              run: go mod download
 
-      - name: Install dependencies
-        run: uv sync --all-extras
+            - name: Check formatting
+              run: test -z "$(gofmt -l .)"
 
-      - name: Run tests
-        run: uv run pytest -v
+            - name: Vet
+              run: go vet ./...
+
+            - name: Test
+              run: go test -race ./...
+
+            - name: Build
+              run: go build ./...
